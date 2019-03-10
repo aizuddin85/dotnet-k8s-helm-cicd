@@ -10,6 +10,7 @@
  *                        deployed
  *   - appVersion       : Version of application to pass to the application
  *                        (application specific)
+ *   - ingressHost      : Ingress Host to set given target environment
  *   - imageRepo        : Registry URL (including app subpath) from where to pull
  *                        application container image
  *   - imageTag         : Tag of application container image to pull
@@ -19,7 +20,7 @@
  *   - chartDirectory   : Location of directory in repo containing Helm charts
  *                        (relative to repo top level) 
  */
-def helmInstall(tillerNs, k8sCluster, clusterAuthToken, namespace, appVersion, imageRepo, imageTag, imagePullPolicy, releaseName, chartDirectory) {
+def helmInstall(tillerNs, k8sCluster, clusterAuthToken, namespace, appVersion, ingressHost, imageRepo, imageTag, imagePullPolicy, releaseName, chartDirectory) {
     sh '''
 
     export HOME="`pwd`"
@@ -33,6 +34,7 @@ def helmInstall(tillerNs, k8sCluster, clusterAuthToken, namespace, appVersion, i
     helm upgrade --install \
         --namespace "''' + namespace + '''" \
         --set app.version="''' + appVersion + '''" \
+        --set ingress.host="''' + ingressHost + '''" \
         --set image.repository="''' + imageRepo + '''" \
         --set image.tag="''' + imageTag + '''" \
         --set image.pullPolicy="''' + imagePullPolicy + '''" \
@@ -57,6 +59,9 @@ pipeline {
         string(name: 'k8sClusterUrl', defaultValue: 'https://192.168.99.100:8443', description: 'Target cluster for all deployments')
         string(name: 'productionNamespace', defaultValue: 'sample-projects', description: 'Production namespace. Appended with -dev and -qa for those environments')
         string(name: 'tillerNS', defaultValue: 'tiller', description: 'Namespace on K8S cluster where tiller server is installed')
+        string(name: 'devIngressHost', defaultValue: 'sample-dotnet-app-sample-projects-dev.192.168.99.100.nip.io', description:'Ingress Host to set when deploying in Dev environment.')
+        string(name: 'qaIngressHost', defaultValue: 'sample-dotnet-app-sample-projects-qa.192.168.99.100.nip.io', description:'Ingress Host to set when deploying in QA environment.')
+        string(name: 'prodIngressHost', defaultValue: 'sample-dotnet-app-sample-projects.192.168.99.100.nip.io', description:'Ingress Host to set when deploying in Production environment.')
 
         // Jenkins Properties
         string(name: 'imageRegistryCredentialId', defaultValue: 'image-registry-auth', description: 'ID of Jenkins credential containing container image registry username and password')
@@ -85,6 +90,9 @@ pipeline {
         productionNamespace  = "${productionNamespace}"
         qaNamespace          = "${productionNamespace + '-qa'}"
         developmentNamespace = "${productionNamespace + '-dev'}"
+        prodIngressHost      = "${prodIngressHost}"
+        qaIngressHost        = "${qaIngressHost}"
+        devIngressHost       = "${devIngressHost}"
 
         // Jenkins Properties
         imageRegistryCredentialId = "${imageRegistryCredentialId}"
@@ -207,9 +215,15 @@ spec:
                         // only push to registry for branches where deploy stages won't be skipped
                         if(releaseBranch.equals(BRANCH_NAME) || mainBranch.equals(BRANCH_NAME)) {
                             withCredentials([usernamePassword(credentialsId: imageRegistryCredentialId, usernameVariable: 'USER', passwordVariable: 'PASS')]) {
-                                sh '''
-                                buildah push --creds="$USER:$PASS" "${imageRepo}:${buildVersion}"
-                                '''
+                                sh 'buildah push --creds="$USER:$PASS" "${imageRepo}:${buildVersion}"'
+
+                                // if releasing, slide the latest tag
+                                if(releaseBranch.equals(BRANCH_NAME)) {
+                                    sh '''
+                                    buildah tag "${imageRepo}:${buildVersion}" "${imageRepo}:latest"
+                                    buildah push --creds="$USER:$PASS" "${imageRepo}:latest"
+                                    '''
+                                }
                             }
                         }
                     }
@@ -302,19 +316,21 @@ spec:
                     script {
 
                         // by default use values for dev envrionment
-                        def namespace = developmentNamespace
-                        def releaseName = appName + '-dev'
+                        def namespace       = developmentNamespace
+                        def ingressHost     = devIngressHost
+                        def releaseName     = appName + '-dev'
                         def imagePullPolicy = 'Always'
 
                         // if on release branch, override them for QA environment
                         if(releaseBranch.equals(BRANCH_NAME)) {
-                            namespace = qaNamespace
-                            releaseName = appName + '-qa'
+                            namespace       = qaNamespace
+                            ingressHost     = qaIngressHost
+                            releaseName     = appName + '-qa'
                             imagePullPolicy = 'IfNotPresent'
                         }
 
                         withCredentials([string(credentialsId: k8sTokenCredentialId, variable: 'token')]) {
-                            helmInstall(tillerNS, k8sClusterUrl, token, namespace, buildVersionWithHash, imageRepo, buildVersion, imagePullPolicy, releaseName, helmChartDirectory)
+                            helmInstall(tillerNS, k8sClusterUrl, token, namespace, buildVersionWithHash, ingressHost, imageRepo, buildVersion, imagePullPolicy, releaseName, helmChartDirectory)
                         }
                     }
 
@@ -376,7 +392,7 @@ spec:
                 container('helm') {
 
                     withCredentials([string(credentialsId: k8sTokenCredentialId, variable: 'token')]) {
-                        helmInstall(tillerNS, k8sClusterUrl, token, productionNamespace, buildVersionWithHash, imageRepo, buildVersion, 'IfNotPresent', appName, helmChartDirectory)
+                        helmInstall(tillerNS, k8sClusterUrl, token, productionNamespace, buildVersionWithHash, prodIngressHost, imageRepo, buildVersion, 'IfNotPresent', appName, helmChartDirectory)
                     }
 
                 }
